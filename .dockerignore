@@ -20,3 +20,10 @@ docker-compose.yml
 docs
 README.md
 LICENSE
+
+# Cloudflare local secrets and generated artifacts
+.dev.vars
+.dev.vars.*
+.open-next
+.wrangler
+cloudflare-env.d.ts

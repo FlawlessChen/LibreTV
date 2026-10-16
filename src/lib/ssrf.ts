@@ -59,10 +59,13 @@ export async function isBlockedByDNS(urlString: string): Promise<boolean> {
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.includes(':')) {
       return isPrivateIP(hostname);
     }
-    const result = await dns.lookup(hostname, { all: true });
-    return result.some((r) => isPrivateIP(r.address));
+    // Workers supports resolve4/resolve6, but dns.lookup is not implemented.
+    // Inspect both families: a missing AAAA record must not hide a private A record.
+    const results = await Promise.allSettled([dns.resolve4(hostname), dns.resolve6(hostname)]);
+    const addresses = results.flatMap((result) => result.status === 'fulfilled' ? result.value : []);
+    return addresses.length === 0 || addresses.some(isPrivateIP);
   } catch {
-    return false; // 解析失败不阻断，交给后续请求处理
+    return true; // 无法校验目标地址时拒绝代理，避免静默跳过 DNS 防护
   }
 }
 

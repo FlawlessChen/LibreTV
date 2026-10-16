@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { isPrivateIP, isValidProxyUrl } from './ssrf';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { checkUpstreamAllowed, isBlockedByDNS, isPrivateIP, isValidProxyUrl } from './ssrf';
+
+const { resolve4, resolve6 } = vi.hoisted(() => ({
+  resolve4: vi.fn<() => Promise<string[]>>(),
+  resolve6: vi.fn<() => Promise<string[]>>(),
+}));
+
+vi.mock('node:dns/promises', () => ({ default: { resolve4, resolve6 } }));
 
 describe('isPrivateIP', () => {
   it.each([
@@ -66,5 +73,56 @@ describe('isValidProxyUrl', () => {
     expect(isValidProxyUrl('file:///etc/passwd')).toBe(false);
     expect(isValidProxyUrl('ftp://x.com/a')).toBe(false);
     expect(isValidProxyUrl('not a url')).toBe(false);
+  });
+});
+
+describe('DNS upstream validation', () => {
+  beforeEach(() => {
+    resolve4.mockReset().mockResolvedValue(['93.184.216.34']);
+    resolve6.mockReset().mockResolvedValue(['2606:4700::1111']);
+  });
+
+  it('allows public IPv4 and IPv6 answers', async () => {
+    expect(await checkUpstreamAllowed('https://cdn.example.com/video.m3u8')).toEqual({ ok: true });
+  });
+
+  it('blocks a private A record even when the AAAA lookup fails', async () => {
+    resolve4.mockResolvedValue(['192.168.1.1']);
+    resolve6.mockRejectedValue(new Error('ENODATA'));
+    expect(await isBlockedByDNS('https://cdn.example.com/video.m3u8')).toBe(true);
+  });
+
+  it('blocks a private AAAA record even when public A records exist', async () => {
+    resolve6.mockResolvedValue(['fd00::1']);
+    expect(await isBlockedByDNS('https://cdn.example.com/video.m3u8')).toBe(true);
+  });
+
+  it('allows IPv6-only public hosts', async () => {
+    resolve4.mockRejectedValue(new Error('ENODATA'));
+    expect(await isBlockedByDNS('https://cdn.example.com/video.m3u8')).toBe(false);
+  });
+
+  it('allows IPv4-only public hosts', async () => {
+    resolve6.mockRejectedValue(new Error('ENODATA'));
+    expect(await isBlockedByDNS('https://cdn.example.com/video.m3u8')).toBe(false);
+  });
+
+  it('rejects targets when neither address family can be verified', async () => {
+    resolve4.mockRejectedValue(new Error('SERVFAIL'));
+    resolve6.mockRejectedValue(new Error('SERVFAIL'));
+    expect(await checkUpstreamAllowed('https://cdn.example.com/video.m3u8')).toMatchObject({ ok: false });
+  });
+
+  it('rejects empty DNS answers', async () => {
+    resolve4.mockResolvedValue([]);
+    resolve6.mockResolvedValue([]);
+    expect(await isBlockedByDNS('https://cdn.example.com/video.m3u8')).toBe(true);
+  });
+
+  it('checks literal addresses without DNS requests', async () => {
+    expect(await isBlockedByDNS('http://192.168.1.1/video.m3u8')).toBe(true);
+    expect(await isBlockedByDNS('https://8.8.8.8/video.m3u8')).toBe(false);
+    expect(resolve4).not.toHaveBeenCalled();
+    expect(resolve6).not.toHaveBeenCalled();
   });
 });

@@ -42,8 +42,13 @@ function useUpstreamUpdate(current: string | null): UpstreamUpdate | null {
     let alive = true;
     fetch(UPSTREAM_TAGS_API)
       .then((r) => (r.ok ? r.json() : []))
-      .then((tags: { name?: string }[]) => {
-        const name = tags[0]?.name?.replace(/^v/, '');
+      .then((tags: unknown) => {
+        const latest: unknown = Array.isArray(tags) ? tags[0] : undefined;
+        if (!latest || typeof latest !== 'object' || !('name' in latest) || typeof latest.name !== 'string') {
+          if (alive) setState(null);
+          return;
+        }
+        const name = latest.name.replace(/^v/, '');
         if (!name || !alive) return;
         try {
           sessionStorage.setItem(cacheKey, name);

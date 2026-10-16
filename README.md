@@ -27,6 +27,12 @@ LibreTV Next.js 迁移版：免费在线视频聚合搜索与观看平台。基�
 
 ## 部署
 
+### Cloudflare Workers
+
+本 fork 已增加 OpenNext + Workers 适配，保留 Next.js 新版功能。
+完整的控制台配置、本地预览和命令行部署步骤见 [Workers 部署指南](docs/cloudflare-workers.md)。
+
+
 ### Docker（推荐）
 
 ```bash
