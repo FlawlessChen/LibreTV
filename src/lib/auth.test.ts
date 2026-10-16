@@ -117,6 +117,19 @@ describe('checkRateLimit', () => {
     expect(checkRateLimit('5.6.7.8')).toBe(true);
   });
 
+  it('expired attempts reset during the next request without a background timer', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-10-16T00:00:00Z'));
+      for (let i = 0; i < 10; i++) expect(checkRateLimit('1.2.3.4')).toBe(true);
+      expect(checkRateLimit('1.2.3.4')).toBe(false);
+      vi.setSystemTime(new Date('2026-10-16T00:10:01Z'));
+      expect(checkRateLimit('1.2.3.4')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clearRateLimit 解除限制', () => {
     clearRateLimit('1.2.3.4');
     for (let i = 0; i < 11; i++) checkRateLimit('1.2.3.4');

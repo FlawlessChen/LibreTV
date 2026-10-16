@@ -81,9 +81,17 @@ export function sessionFromCookieHeader(cookieHeader: string | null): boolean {
 const attemptMap = new Map<string, { count: number; resetAt: number }>();
 const MAX_ATTEMPTS = 10;
 const WINDOW_MS = 10 * 60 * 1000;
+let lastCleanupAt = 0;
 
 export function checkRateLimit(ip: string): boolean {
   const now = Date.now();
+  // Clean up during requests; Workers cannot run a background timer at module load.
+  if (now - lastCleanupAt >= 60_000) {
+    for (const [key, entry] of attemptMap) {
+      if (now > entry.resetAt) attemptMap.delete(key);
+    }
+    lastCleanupAt = now;
+  }
   const entry = attemptMap.get(ip);
   if (!entry || now > entry.resetAt) {
     attemptMap.set(ip, { count: 1, resetAt: now + WINDOW_MS });
@@ -96,16 +104,4 @@ export function checkRateLimit(ip: string): boolean {
 
 export function clearRateLimit(ip: string): void {
   attemptMap.delete(ip);
-}
-
-// 定期清理过期限流记录，避免长期运行下 Map 膨胀
-if (typeof setInterval === 'function') {
-  const timer = setInterval(() => {
-    const now = Date.now();
-    for (const [ip, entry] of attemptMap) {
-      if (now > entry.resetAt) attemptMap.delete(ip);
-    }
-  }, 60 * 1000);
-  // 不阻止 Node 进程退出
-  if (typeof timer.unref === 'function') timer.unref();
 }
