@@ -4,6 +4,14 @@
 使用 Node.js 22，安装依赖后生成 Worker 产物；无需 R2、KV 或 D1。
 原有 npm run dev、npm run build、npm start 和 Docker 部署仍可使用。
 
+## 当前部署入口
+
+- 自定义域名：https://tv.cqfly.xyz
+- Workers 默认地址：https://libretv.171444135.workers.dev
+
+wrangler.jsonc 已记录自定义域名绑定，并显式启用 workers.dev 地址。
+两个入口连接同一个 Worker，使用相同的运行时密码；浏览器会分别保存各域名的登录 Cookie。
+
 ## 本地构建与检查
 
 ```powershell

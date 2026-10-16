@@ -3,7 +3,10 @@
   "name": "libretv",
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-10-16",
-  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
   "keep_vars": true,
   "assets": {
     "directory": ".open-next/assets",
@@ -12,5 +15,12 @@
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
-  }
+  },
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "tv.cqfly.xyz",
+      "custom_domain": true
+    }
+  ]
 }
