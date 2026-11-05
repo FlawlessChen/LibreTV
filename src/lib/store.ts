@@ -2,7 +2,9 @@
 
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import type { SourceConfig, LiveSourceConfig, SourceSearchOutcome } from './types';
+import type { QualityEntry, SourceConfig, LiveSourceConfig, SourceSearchOutcome } from './types';
+import { migrateSkipMarks, type SkipMark, type SkipSegment } from './skip-marks';
+import { isQualityEntryFresh, mergeQualityEntries, qualityKey } from './quality';
 import { clearLiveProbeResultsDb, loadLiveProbeResults, saveLiveProbeResults } from './db';
 import { PERSIST_KEY, createThrottledStorage } from './persist-storage';
 
@@ -22,6 +24,19 @@ export interface AppSettings {
   /** 用户是否在设置中主动选择过推荐数据源；为 false 时部署者的 DEFAULT_RECOMMEND_SOURCE 默认值可生效 */
   recommendSourceTouched: boolean;
   autoplayNext: boolean;
+  /**
+   * 音量放大（Web Audio 增益链，约 1.8 倍）：默认关闭。
+   * 增益与 video.volume 相乘，对所有音量档位生效，会整体抬高响度，
+   * 因此只作为用户显式开启的兜底，不作为出厂默认。
+   */
+  volumeBoost: boolean;
+  /** 跳过片段：按归一化剧名持久化，详见 lib/skip-marks.ts */
+  skipMarks: Record<string, SkipMark>;
+  /**
+   * 自动跳过标记的片段：片头/中段跳到片段末尾，片尾则直接结束本集。
+   * 三类都是「标记区间 → 不播」，所以共用同一个开关；是否连播下一集仍由 autoplayNext 决定。
+   */
+  autoSkipSegments: boolean;
   imageProxyMode: 'direct' | 'proxy' | 'custom';
   /** 用户是否在设置中主动选择过封面图加载方式；为 false 时部署者的 DEFAULT_IMAGE_MODE 默认值可生效 */
   imageProxyModeTouched: boolean;
@@ -55,6 +70,14 @@ export interface SourceSubscription {
    * 不改动各源自身的勾选状态、也不删除已导入的数据，因此随时可无损恢复。
    */
   enabled?: boolean;
+  /**
+   * 自动刷新周期（天）。undefined = 只手动同步（默认，与历史行为一致）；
+   * 1-365 表示打开站点时按该周期静默刷新（详见 lib/subscription-sync.ts）。
+   * 预置订阅（DEFAULT_SUBSCRIPTIONS）也读这里：用户显式设过就覆盖部署者的默认值。
+   */
+  refreshDays?: number;
+  /** 连续同步失败次数：达到阈值后暂停自动刷新，成功一次清零 */
+  failStreak?: number;
 }
 
 /** 删除点播源后的撤销快照 */
@@ -197,6 +220,8 @@ interface AppState extends AppSettings {
   liveProbeResults: Record<string, LiveProbeEntry>;
   /** 点播源健康度（随搜索滚动更新，跨会话持久化） */
   sourceHealth: Record<string, SourceHealthEntry>;
+  /** 画质缓存（按 `sourceKey:vodId`）：播放实测与搜索时懒探测共用一份 */
+  qualityMap: Record<string, QualityEntry>;
   /** 已出现过的 env 预置订阅 URL（持久化：用户删除后不再被自动加回） */
   envSubsSeen: string[];
   addCustomApi: (api: Omit<SourceConfig, 'key'> & { key?: string }) => void;
@@ -212,9 +237,15 @@ interface AppState extends AppSettings {
   removeSubscription: (url: string) => void;
   /** 整体启用/停用某个订阅（停用只影响搜索时是否采用，不动各源的勾选状态） */
   setSubscriptionEnabled: (url: string, enabled: boolean) => void;
+  /** 设置自动刷新周期；传 undefined 表示改为纯手动同步 */
+  setSubscriptionRefreshDays: (url: string, days: number | undefined) => void;
   markSubscriptionSynced: (url: string, name?: string, counts?: SubscriptionSyncCounts) => void;
-  /** 记录一次同步失败（保留该订阅与已导入的源，仅更新状态供列表展示） */
-  markSubscriptionFailed: (url: string, error: string) => void;
+  /**
+   * 记录一次同步失败（保留该订阅与已导入的源，仅更新状态供列表展示）。
+   * `countFailure: false` 用于鉴权失败（401/503）——那是会话问题不是源的问题，
+   * 计入连续失败会让自动刷新被误暂停。
+   */
+  markSubscriptionFailed: (url: string, error: string, options?: { countFailure?: boolean }) => void;
   /** 用订阅内容整体替换该订阅名下的点播源，返回新增数量 */
   applySubscriptionSources: (subUrl: string, list: Omit<SourceConfig, 'key'>[]) => number;
   /** 用订阅内容整体替换该订阅名下的直播源，返回新增数量 */
@@ -251,6 +282,20 @@ interface AppState extends AppSettings {
   recordSourceHealth: (outcomes: SourceSearchOutcome[]) => SourceDisableEvent[];
   /** 清除单个源的健康度记录（手动恢复入口） */
   clearSourceHealth: (key: string) => void;
+  /**
+   * 写入画质记录（播放实测与懒探测共用同一份缓存）。
+   * 实测值优先级高于探测值：解析 m3u8 得到的只是源站声明的档位，
+   * 播放时的 videoHeight 才是真实分辨率，实测一旦拿到就覆盖探测结果。
+   */
+  setQuality: (entries: Record<string, QualityEntry>) => void;
+  /** 写入/更新一部剧的跳过片段（整体替换 segments，空数组表示清除） */
+  setSkipMark: (key: string, segments: SkipSegment[]) => void;
+  /** 本剧跳过总开关：关闭后保留标记但不生效 */
+  setSkipMarkEnabled: (key: string, enabled: boolean) => void;
+  /** 清除单部剧的跳过片段 */
+  clearSkipMark: (key: string) => void;
+  /** 清除全部跳过片段（设置面板的「清除全部」入口） */
+  clearAllSkipMarks: () => void;
   markEnvSubsSeen: (urls: string[]) => void;
   updateSettings: (patch: Partial<Omit<AppSettings, 'customAPIs' | 'selectedKeys'>>) => void;
 }
@@ -287,6 +332,7 @@ export const useAppStore = create<AppState>()(
       liveRecent: [],
       liveProbeResults: {},
       sourceHealth: {},
+      qualityMap: {},
       envSubsSeen: [],
       selectedKeys: [],
       yellowFilter: true,
@@ -295,6 +341,11 @@ export const useAppStore = create<AppState>()(
       recommendSource: 'hot-list',
       recommendSourceTouched: false,
       autoplayNext: true,
+      // 音量放大默认关闭：开启后对所有音量档位整体抬高约 1.8 倍，交给用户显式选择
+      volumeBoost: false,
+      skipMarks: {},
+      // 自动跳过默认开启，但只有用户真正标记过片段才生效
+      autoSkipSegments: true,
       // 直连优先：豆瓣封面有公共镜像 + 内置代理两级兜底（见 buildImageCandidates），
       // 默认省服务器流量；老用户保持已持久化的选择不受影响。
       // 部署者可用 DEFAULT_IMAGE_MODE=proxy 下发内置代理优先（最稳定，吃服务器流量）
@@ -413,6 +464,8 @@ export const useAppStore = create<AppState>()(
                   lastStatus: 'ok',
                   lastError: undefined,
                   lastCounts: counts ?? s.lastCounts,
+                  // 成功即清零：自动刷新被暂停的订阅会随之恢复
+                  failStreak: 0,
                 }
               : s
           ),
@@ -425,11 +478,27 @@ export const useAppStore = create<AppState>()(
         });
       },
 
-      markSubscriptionFailed: (url, error) => {
-        // 失败不清空已导入的源（旧数据保留），仅记录状态供列表展示
+      setSubscriptionRefreshDays: (url, days) => {
         set({
           subscriptions: get().subscriptions.map((s) =>
-            s.url === url ? { ...s, lastStatus: 'error', lastError: error } : s
+            s.url === url ? { ...s, refreshDays: days } : s
+          ),
+        });
+      },
+
+      markSubscriptionFailed: (url, error, options) => {
+        // 失败不清空已导入的源（旧数据保留），仅记录状态供列表展示
+        const countFailure = options?.countFailure !== false;
+        set({
+          subscriptions: get().subscriptions.map((s) =>
+            s.url === url
+              ? {
+                  ...s,
+                  lastStatus: 'error',
+                  lastError: error,
+                  failStreak: countFailure ? (s.failStreak ?? 0) + 1 : s.failStreak,
+                }
+              : s
           ),
         });
       },
@@ -708,6 +777,50 @@ export const useAppStore = create<AppState>()(
         set({ envSubsSeen: [...seen] });
       },
 
+      setQuality: (entries) => {
+        // 合并与淘汰规则见 mergeQualityEntries（纯函数，单独覆盖了优先级与 TTL 的单测）
+        set({ qualityMap: mergeQualityEntries(get().qualityMap, entries) });
+      },
+
+      setSkipMark: (key, segments) => {
+        const marks = get().skipMarks;
+        // 空片段列表整条删除，持久化快照里不留空壳条目
+        if (!segments || segments.length === 0) {
+          if (!marks[key]) return;
+          const rest = { ...marks };
+          delete rest[key];
+          set({ skipMarks: rest });
+          return;
+        }
+        set({
+          skipMarks: {
+            ...marks,
+            [key]: {
+              segments,
+              // 改片段不重置本剧总开关：用户可能只是修一条标错的边界
+              enabled: marks[key]?.enabled ?? true,
+              updatedAt: Date.now(),
+            },
+          },
+        });
+      },
+
+      setSkipMarkEnabled: (key, enabled) => {
+        const marks = get().skipMarks;
+        const mark = marks[key];
+        if (!mark || mark.enabled === enabled) return;
+        set({ skipMarks: { ...marks, [key]: { ...mark, enabled, updatedAt: Date.now() } } });
+      },
+
+      clearSkipMark: (key) => {
+        if (!get().skipMarks[key]) return;
+        const rest = { ...get().skipMarks };
+        delete rest[key];
+        set({ skipMarks: rest });
+      },
+
+      clearAllSkipMarks: () => set({ skipMarks: {} }),
+
       updateSettings: (patch) => {
         // 用户主动修改推荐数据源 / 封面图加载方式时打上「已选择」标记：此后部署者的
         // DEFAULT_RECOMMEND_SOURCE / DEFAULT_IMAGE_MODE 默认值不再覆盖该用户的选择
@@ -741,12 +854,51 @@ export const useAppStore = create<AppState>()(
       storage: createJSONStorage(createThrottledStorage),
       // v1：直播源新增归属字段、最近观看新增 sourceUrl。
       // v2：直播源归属改为多引用（fromSubscription 单值 → fromSubscriptions 数组）。
+      // v3：新增片头片尾标记与自动跳过开关（旧快照缺字段时补默认值）。
+      // v4：片头/片尾双标记泛化为跳过片段 segments（opening/middle/ending）。
+      // v5：标记新增本剧总开关 enabled。
+      // v6：自动跳过由「片头 / 中段」合并为单一开关。
+      // v7：片尾结束也并入同一开关（不再单独提供 autoSkipOutro）。
+      // v8：订阅新增 refreshDays / failStreak——两者都缺省即「纯手动 + 无失败记录」，
+      //     与旧行为完全一致，因此无需改写存量数据，仅借版本号让 migrate 跑一遍。
       // 此前未声明 version 的存量数据会被视为 v0 并走 migrate 补齐。
-      version: 2,
+      version: 8,
       migrate: (persisted, version) => {
         const state = { ...((persisted ?? {}) as Partial<AppState>) };
         if (!Array.isArray(state.liveRecent)) state.liveRecent = [];
         if (!Array.isArray(state.liveSubscriptions)) state.liveSubscriptions = [];
+
+        // v3 的片头/片尾双标记 → v4 的 segments（纯函数，脏数据在内部丢弃）
+        state.skipMarks = migrateSkipMarks(
+          (state as unknown as { skipMarks?: unknown }).skipMarks
+        );
+
+        // 「自动跳过」只有一个开关，覆盖片头/中段/片尾（都是「标记区间 → 不播」）。
+        // v3 autoSkipIntro / v4 autoSkipSegments / v5 autoSkipOpening / v5-v6 autoSkipOutro 统一归一：
+        // 以「跳过」开关为准，其次才看旧的分项开关，都没有时按默认开启。
+        const legacy = state as unknown as {
+          autoSkipIntro?: unknown;
+          autoSkipSegments?: unknown;
+          autoSkipOpening?: unknown;
+          autoSkipMiddle?: unknown;
+          autoSkipOutro?: unknown;
+        };
+        if (typeof legacy.autoSkipSegments !== 'boolean') {
+          state.autoSkipSegments =
+            typeof legacy.autoSkipOpening === 'boolean'
+              ? legacy.autoSkipOpening
+              : typeof legacy.autoSkipIntro === 'boolean'
+                ? legacy.autoSkipIntro
+                : typeof legacy.autoSkipOutro === 'boolean'
+                  ? legacy.autoSkipOutro
+                  : true;
+        }
+
+        // 迁移完成后清掉旧字段，避免内存里同时存在两套语义
+        for (const stale of ['autoSkipIntro', 'autoSkipOpening', 'autoSkipMiddle', 'autoSkipOutro']) {
+          delete (state as unknown as Record<string, unknown>)[stale];
+        }
+
         if (version < 2) {
           state.liveSubscriptions = state.liveSubscriptions.map((s) => {
             const legacy = s as LiveSubscription & { fromSubscription?: unknown };
@@ -780,6 +932,7 @@ export const useAppStore = create<AppState>()(
         liveFavorites: s.liveFavorites,
         liveRecent: s.liveRecent,
         sourceHealth: s.sourceHealth,
+        qualityMap: s.qualityMap,
         envSubsSeen: s.envSubsSeen,
         yellowFilter: s.yellowFilter,
         adFilter: s.adFilter,
@@ -787,6 +940,9 @@ export const useAppStore = create<AppState>()(
         recommendSource: s.recommendSource,
         recommendSourceTouched: s.recommendSourceTouched,
         autoplayNext: s.autoplayNext,
+        volumeBoost: s.volumeBoost,
+        skipMarks: s.skipMarks,
+        autoSkipSegments: s.autoSkipSegments,
         imageProxyMode: s.imageProxyMode,
         imageProxyModeTouched: s.imageProxyModeTouched,
         customImageProxy: s.customImageProxy,
@@ -855,6 +1011,30 @@ export function isSourceDisabled(
   const e = state.sourceHealth[key];
   if (!e) return false;
   return e.permanent === true || (!!e.disabledUntil && e.disabledUntil > now);
+}
+
+/**
+ * 读取某「源 + 影片」的画质记录（直接查内存态，不订阅 store）。
+ * 结果列表一次可能有十几张卡片 × 十几个来源，订阅整个 map 会让每次探测
+ * 结果都触发所有卡片重渲染，因此只在展开面板 / 探测回调时用 getState 读。
+ */
+export function readQuality(sourceKey: string, vodId: string): QualityEntry | undefined {
+  const entry = useAppStore.getState().qualityMap[qualityKey(sourceKey, vodId)];
+  // 过期条目按「没有结论」处理：持久化回来后 TTL 只在写入时清理过，
+  // 直接返回会让旧画质一直显示，且因为被认为已有结论而永远不重探
+  return entry && isQualityEntryFresh(entry) ? entry : undefined;
+}
+
+/** 批量读取：一次拿多个「源 + 影片」的画质，避免逐个 getState */
+export function readQualities(pairs: Array<{ sourceKey: string; vodId: string }>): Record<string, QualityEntry> {
+  const map = useAppStore.getState().qualityMap;
+  const out: Record<string, QualityEntry> = {};
+  for (const p of pairs) {
+    const key = qualityKey(p.sourceKey, p.vodId);
+    const entry = map[key];
+    if (entry && isQualityEntryFresh(entry)) out[key] = entry;
+  }
+  return out;
 }
 
 /**

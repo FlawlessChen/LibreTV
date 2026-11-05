@@ -1,10 +1,15 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { SearchResultItem } from '@/lib/types';
+import type { SearchResultItem, SourceConfig } from '@/lib/types';
 import { useAppStore } from '@/lib/store';
+import { qualityKey } from '@/lib/quality';
+import { compactRemarks, formatRemarks, inferGroupRemarks } from '@/lib/remarks';
 import { cn } from '@/lib/utils';
 import { SmartImage } from './smart-image';
+import { QualityBadge } from './quality-badge';
+import { useQualityProbe } from './use-quality-probe';
+import { useInView } from './use-in-view';
 
 // —— 跨源同名聚合 ——
 
@@ -25,7 +30,9 @@ function buildGroup(name: string, year: string | undefined, items: SearchResultI
     year,
     typeName: items.find((i) => i.typeName)?.typeName,
     pic: items.find((i) => i.pic)?.pic,
-    remarks: items.find((i) => i.remarks)?.remarks,
+    // 同一部剧各源文案详略不同（「全34集」/「完结」/「更新至34集」），推到统一结论，
+    // 否则同一部剧的来源列表会看起来状态各异
+    remarks: inferGroupRemarks(items.map((i) => i.remarks)),
     items,
   };
 }
@@ -67,9 +74,12 @@ export function aggregateResults(list: SearchResultItem[]): AggregatedGroup[] {
 export function AggregatedCard({
   group,
   onOpen,
+  sources,
 }: {
   group: AggregatedGroup;
   onOpen: (item: SearchResultItem) => void;
+  /** 完整源配置：探测画质需要 source.url / source.detail，搜索结果里只带 sourceUrl */
+  sources?: SourceConfig[];
 }) {
   const imageProxyMode = useAppStore((s) => s.imageProxyMode);
   const customImageProxy = useAppStore((s) => s.customImageProxy);
@@ -80,13 +90,63 @@ export function AggregatedCard({
   const multi = group.items.length > 1;
   const adult = useMemo(() => group.items.some((i) => i.isAdult), [group.items]);
 
+  const { qualities, probing, progress, prime, probe, probeQueued, retry } = useQualityProbe(sources);
+
+  // 收起态就要有结论：先读缓存（展开时才真正探测）。
+  // 依赖 group.key 而不是 items 数组——搜索页每次重渲染都会重建分组对象，
+  // 用数组做依赖会让这个 effect 每帧触发，进而 setState 死循环。
+  useEffect(() => {
+    prime(group.items);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.key]);
+
+  // 单源卡片没有「展开」这一步：进入视口 500ms 后交给全局队列（并发 2），
+  // 首屏能先亮，又不会把一屏十几张卡同时打向源站
+  const { ref: inViewRef, inView } = useInView<HTMLDivElement>(!multi);
+  useEffect(() => {
+    if (!multi && inView) probeQueued(group.items);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multi, inView, group.key]);
+
   const activate = () => {
-    if (multi) setExpanded((v) => !v);
-    else onOpen(group.items[0]);
+    if (multi) {
+      const next = !expanded;
+      setExpanded(next);
+      if (next) probe(group.items);
+    } else {
+      onOpen(group.items[0]);
+    }
   };
 
+  const singleItem = multi ? undefined : group.items[0];
+  const singleKey = singleItem ? qualityKey(singleItem.sourceKey, singleItem.vodId) : undefined;
+
+  // 展开面板按画质降序（同级保持原有源顺序）：探到一个更好的就往上走，
+  // 用户不必自己横向比较三行灰字。没探到 / 未探到的排在最后。
+  const heightOf = (item: SearchResultItem) => qualities[qualityKey(item.sourceKey, item.vodId)]?.height ?? 0;
+  const sortedItems = useMemo(() => {
+    const height = (item: SearchResultItem) => qualities[qualityKey(item.sourceKey, item.vodId)]?.height ?? 0;
+    return group.items
+      .map((item, index) => ({ item, index }))
+      .sort((a, b) => height(b.item) - height(a.item) || a.index - b.index)
+      .map((entry) => entry.item);
+  }, [group.items, qualities]);
+  const bestHeight = sortedItems.reduce((max, item) => Math.max(max, heightOf(item)), 0);
+  // 并列最高时只强调排在第一的那一行：三个源里框两个等于没有推荐
+  const firstBest = sortedItems.find((item) => bestHeight > 0 && heightOf(item) === bestHeight);
+  const bestKey = firstBest ? qualityKey(firstBest.sourceKey, firstBest.vodId) : undefined;
+  // 各源集数一致时（常见：同剧多源同步更新）只在表头说一次，逐行不再重复
+  const remarksList = sortedItems.map((item) => compactRemarks(item.remarks));
+  const sharedRemarks =
+    remarksList.length > 0 && remarksList.every((label) => label && label === remarksList[0])
+      ? remarksList[0]
+      : undefined;
+
   return (
-    <div className={cn('card', !multi && 'hover:scale-[1.02] hover:shadow-md', multi && expanded && 'ring-1 ring-accent/40')}>
+    <div
+      ref={inViewRef}
+      className={cn('card', !multi && 'hover:scale-[1.02] hover:shadow-md', multi && expanded && 'ring-1 ring-accent/40')}
+    >
       {/* 不用 h-full：展开面板需要撑高卡片，等高裁切会让面板不可见 */}
       <div
         className="flex h-full cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60"
@@ -140,23 +200,46 @@ export function AggregatedCard({
               {group.typeName && <span className="tag bg-accent/15 text-accent">{group.typeName}</span>}
               {group.year && <span className="tag bg-purple-500/15 text-purple-600 dark:text-purple-300">{group.year}</span>}
               {adult && <span className="tag bg-pink-500/15 text-pink-600 dark:text-pink-400">(18+)</span>}
+              {/* 单源卡片没有展开列表，画质只能在这里露出；失败态可点重试 */}
+              {singleKey && (
+                <QualityBadge
+                  entry={qualities[singleKey]}
+                  loading={probing[singleKey]}
+                  onRetry={singleItem ? () => retry([singleItem]) : undefined}
+                />
+              )}
             </div>
             <p className="text-xs text-muted line-clamp-2 mb-2">{group.remarks || '暂无介绍'}</p>
           </div>
-          <div className="flex items-center justify-between mt-auto pt-1.5 border-t border-line">
+          <div className="flex items-center justify-between gap-1.5 mt-auto pt-1.5 border-t border-line">
             <span className="tag bg-chip text-muted truncate max-w-[80%]">
               {multi ? `${group.items.length} 个来源` : group.items[0].sourceName}
             </span>
             {multi && (
-              <svg
-                className={cn('w-4 h-4 text-faint transition-transform', expanded && 'rotate-180')}
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-                aria-hidden
-              >
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-              </svg>
+              <span className="flex items-center gap-1 shrink-0">
+                {/* 收起态先给结论：最高画质比「N 个来源」更影响要不要点开 */}
+                {progress.best && (
+                  <span
+                    className="tag bg-accent/15 text-accent font-medium"
+                    title={
+                      progress.known < progress.total
+                        ? `已探到 / 实测的最高画质（${progress.known}/${progress.total} 个来源已有结论）`
+                        : '已探到 / 实测的最高画质'
+                    }
+                  >
+                    {progress.best}
+                  </span>
+                )}
+                <svg
+                  className={cn('w-4 h-4 text-faint transition-transform', expanded && 'rotate-180')}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                  aria-hidden
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </span>
             )}
           </div>
         </div>
@@ -164,35 +247,83 @@ export function AggregatedCard({
 
       {multi && expanded && (
         <div className="border-t border-line p-2.5 animate-fade-in">
-          <p className="text-[10px] text-faint mb-1.5">选择来源播放</p>
-          <div className="flex flex-wrap gap-1.5">
-            {group.items.map((item) => (
-              <button
-                key={`${item.sourceKey}_${item.vodId}`}
-                className={cn(
-                  'group inline-flex items-center gap-1.5 max-w-full rounded-lg border px-2.5 py-1.5',
-                  'text-xs transition-all cursor-pointer',
-                  'border-line bg-chip hover:border-accent hover:bg-accent/10',
-                  item.isAdult && 'border-pink-500/30'
-                )}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onOpen(item);
-                }}
-                aria-label={`使用 ${item.sourceName} 播放`}
-              >
-                <span className="font-medium text-content truncate max-w-[9em]">{item.sourceName}</span>
-                <span className="text-faint truncate max-w-[7em]">{item.remarks || '暂无介绍'}</span>
-                <svg
-                  className="w-3.5 h-3.5 text-accent shrink-0 transition-transform group-hover:scale-110"
-                  fill="currentColor"
-                  viewBox="0 0 24 24"
-                  aria-hidden
+          <div className="flex items-baseline justify-between gap-2 mb-1.5">
+            <p className="text-[10px] text-faint">
+              选择来源
+              {sharedRemarks ? ` · 均 ${sharedRemarks}` : ''}
+            </p>
+            {progress.total > 0 &&
+              (progress.done < progress.total ? (
+                <p className="text-[10px] text-faint tabular-nums">
+                  探测中 {progress.done}/{progress.total}
+                </p>
+              ) : (
+                // 探完后「3/3」已经没有信息量，换成用户真正要的结论
+                <p className="text-[10px] text-accent tabular-nums">
+                  {progress.best ? `最高 ${progress.best}` : '未能探到画质'}
+                  {progress.failed > 0 ? ` · ${progress.failed} 源未探到` : ''}
+                </p>
+              ))}
+          </div>
+          {/*
+            单列全宽行：两列在卡片实际宽度（约 330px）下每列只剩 148px，
+            源名必截断，且源数为奇数时必然留半行空。一行内「源名 / 画质 / 集数 / 播放」
+            四段排开，信息密度更高也更容易纵向扫读。
+          */}
+          <div className="flex flex-col gap-1.5">
+            {sortedItems.map((item) => {
+              const itemKey = qualityKey(item.sourceKey, item.vodId);
+              const label = compactRemarks(item.remarks);
+              const isBest = itemKey === bestKey;
+              return (
+                <div
+                  key={`${item.sourceKey}_${item.vodId}`}
+                  role="button"
+                  tabIndex={0}
+                  className={cn(
+                    'group flex w-full min-w-0 items-center gap-2 rounded-lg border px-2.5 py-2',
+                    'text-xs transition-all cursor-pointer',
+                    'bg-chip hover:border-accent hover:bg-accent/10',
+                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50',
+                    isBest ? 'border-accent/50' : 'border-line',
+                    item.isAdult && 'border-pink-500/30'
+                  )}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpen(item);
+                  }}
+                  onKeyDown={(e) => {
+                    // 不拦冒泡会连带触发整卡的 activate（外层 div 也在监听 Enter/Space）
+                    if (e.key !== 'Enter' && e.key !== ' ') return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onOpen(item);
+                  }}
+                  aria-label={`使用 ${item.sourceName} 播放${label && !sharedRemarks ? `，${label}` : ''}`}
                 >
-                  <path d="M8 5v14l11-7z" />
-                </svg>
-              </button>
-            ))}
+                  <span className="font-medium text-content truncate flex-1 min-w-0">{item.sourceName}</span>
+                  <QualityBadge
+                    entry={qualities[itemKey]}
+                    loading={probing[itemKey]}
+                    onRetry={() => retry([item])}
+                    // 定宽 + 等宽数字：三行的 360P / 540P / 1080P 左缘对齐，不随字符数抖动
+                    className="min-w-[3.25rem] justify-center tabular-nums"
+                  />
+                  {/* 集数一致时已提到表头，逐行不再重复 */}
+                  {!sharedRemarks && label && (
+                    <span className="text-faint shrink-0 tabular-nums">{label}</span>
+                  )}
+                  <svg
+                    className="w-3.5 h-3.5 text-accent shrink-0 transition-transform group-hover:translate-x-0.5"
+                    fill="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden
+                  >
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -251,7 +382,7 @@ export function VideoCard({ item, onClick }: { item: SearchResultItem; onClick: 
               {item.typeName && <span className="tag bg-accent/15 text-accent">{item.typeName}</span>}
               {item.year && <span className="tag bg-purple-500/15 text-purple-600 dark:text-purple-300">{item.year}</span>}
             </div>
-            <p className="text-xs text-muted line-clamp-2 mb-2">{item.remarks || '暂无介绍'}</p>
+            <p className="text-xs text-muted line-clamp-2 mb-2">{formatRemarks(item.remarks) || '暂无介绍'}</p>
           </div>
           <div className="flex items-center justify-between mt-auto pt-1.5 border-t border-line">
             <span className="tag bg-chip text-muted truncate max-w-[80%]">{item.sourceName}</span>
