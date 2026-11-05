@@ -13,6 +13,7 @@ import {
 import { attachVolumeBoost, type VolumeBoostHandle } from '@/lib/volume-boost';
 import { loadCacheSettings } from '@/lib/video-cache';
 import { formatTime } from '@/lib/utils';
+import { BrowserPlayer } from './browser-player';
 import { prefersTouchPointer } from '@/lib/touch-pointer';
 import {
   findActiveSegment,
@@ -55,7 +56,7 @@ export interface PlayerSkipApi {
   isPaused(): boolean;
 }
 
-interface PlayerShellProps {
+export interface PlayerShellProps {
   url: string;
   title: string;
   adFilter: boolean;
@@ -80,6 +81,8 @@ interface PlayerShellProps {
   onPlayerApi?: (api: PlayerSkipApi | null) => void;
   /** 快捷键（Shift+I/O/S/E）记录片段时回调，由父级做校验与写入 */
   onRecordSegment?: (segment: SkipSegment) => void;
+  /** Default to browser controls and real HLS URLs for mobile browser takeover. */
+  nativeControls?: boolean;
   /** 剧集标识 `${source}:${vodId}:${episodeIndex}`（片段缓存按集淘汰的分组键） */
   episodeKey?: string;
   /** 下一集 m3u8 地址：当前集预取完成后预热下一集前 7 分钟 */
@@ -105,7 +108,11 @@ interface PlayerShellProps {
   hasNextEpisode?: boolean;
 }
 
-export function PlayerShell({
+export function PlayerShell(props: PlayerShellProps) {
+  return props.nativeControls === false ? <WebPlayer {...props} /> : <BrowserPlayer {...props} />;
+}
+
+function WebPlayer({
   url,
   title,
   adFilter,

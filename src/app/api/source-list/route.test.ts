@@ -55,7 +55,7 @@ function makeRequest(subUrl = 'https://feed.example.com/subscription.json'): Req
 
 beforeAll(() => {
   process.env.PASSWORD = 'test-password';
-  delete process.env.PROXY_SECRET;
+  Reflect.deleteProperty(process.env, 'PROXY_SECRET');
 });
 
 beforeEach(() => {

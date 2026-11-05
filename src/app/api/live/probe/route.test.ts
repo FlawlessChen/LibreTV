@@ -70,7 +70,7 @@ async function readNdjson(res: Response) {
 
 beforeAll(() => {
   process.env.PASSWORD = 'test-password';
-  delete process.env.PROXY_SECRET;
+  Reflect.deleteProperty(process.env, 'PROXY_SECRET');
 });
 
 afterEach(() => {

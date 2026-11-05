@@ -78,7 +78,7 @@ export function parseXmltv(
   now: number = Date.now()
 ): Map<string, EpgProgram[]> {
   let text: string;
-  if (Buffer.isBuffer(content)) {
+  if (typeof content !== 'string') {
     text =
       content.length >= 2 && content[0] === 0x1f && content[1] === 0x8b
         ? gunzipSync(content).toString('utf8')

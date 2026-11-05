@@ -68,7 +68,7 @@ function WatchContent() {
   // 播放器对外暴露的精确时间读取接口（「记录当前」用），随播放器卸载置空
   const playerApiRef = useRef<PlayerSkipApi | null>(null);
   // 播放框：小屏「跳过标记」抽屉要按它的底边算剩余高度，避免压住画面
-  const playerFrameRef = useRef<HTMLDivElement | null>(null);
+  const playerHostRef = useRef<HTMLDivElement | null>(null);
   const [sheetMaxHeight, setSheetMaxHeight] = useState<number | undefined>(undefined);
 
   useEffect(() => {
@@ -79,7 +79,7 @@ function WatchContent() {
         setSheetMaxHeight(undefined);
         return;
       }
-      const box = playerFrameRef.current?.getBoundingClientRect();
+      const box = playerHostRef.current?.getBoundingClientRect();
       if (!box) {
         setSheetMaxHeight(undefined);
         return;
@@ -98,6 +98,14 @@ function WatchContent() {
       window.visualViewport?.removeEventListener('resize', measure);
     };
   }, [skipPanelOpen]);
+  const [playerMode, setPlayerMode] = useState<'native' | 'web'>('native');
+  const modePositionRef = useRef<{ url: string; position: number } | null>(null);
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem('libretv-player-mode') === 'web') setPlayerMode('web');
+    } catch { /* Browser storage can be unavailable in private mode. */ }
+  }, []);
 
   const source = resolveSource(store, sourceKey, {
     url: searchParams.get('sourceUrl') || undefined,
@@ -157,12 +165,27 @@ function WatchContent() {
 
   // 进度恢复优先级：URL position 参数 > IndexedDB 记录
   const getRestorePosition = useCallback(async () => {
+    const modePosition = modePositionRef.current;
+    if (modePosition?.url === currentUrl) {
+      modePositionRef.current = null;
+      return modePosition.position;
+    }
     const urlPos = parseInt(searchParams.get('position') || '0', 10) || 0;
     if (urlPos > 0) return urlPos;
     if (!vodId) return 0;
     const entry = await db.progress.get(progressKeyOf(sourceKey, vodId, currentIndex));
     return entry?.position ?? 0;
-  }, [searchParams, sourceKey, vodId, currentIndex]);
+  }, [searchParams, sourceKey, vodId, currentIndex, currentUrl]);
+
+  const changePlayerMode = () => {
+    const video = playerHostRef.current?.querySelector('video');
+    modePositionRef.current = video && video.readyState > 0
+      ? { url: currentUrl, position: video.currentTime }
+      : null;
+    const next = playerMode === 'native' ? 'web' : 'native';
+    setPlayerMode(next);
+    try { localStorage.setItem('libretv-player-mode', next); } catch { /* Best effort. */ }
+  };
 
   // 写入观看历史（进入页面即记录，进度后续增量更新）
   useEffect(() => {
@@ -314,7 +337,7 @@ function WatchContent() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 py-4">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-4">
           <div>
-            <div ref={playerFrameRef} className="aspect-video bg-black rounded-lg overflow-hidden">
+            <div ref={playerHostRef} className="aspect-video bg-black rounded-lg overflow-hidden">
               {currentUrl ? (
                 <PlayerShell
                   url={currentUrl}
@@ -328,6 +351,7 @@ function WatchContent() {
                   onPendingStart={setPendingStart}
                   onPlayerApi={(api) => { playerApiRef.current = api; }}
                   onRecordSegment={handleRecordSegment}
+                  nativeControls={playerMode === 'native'}
                   episodeKey={`${sourceKey}:${vodId}:${currentIndex}`}
                   nextUrl={currentIndex + 1 < episodes.length ? episodes[currentIndex + 1] : undefined}
                   nextEpisodeKey={currentIndex + 1 < episodes.length ? `${sourceKey}:${vodId}:${currentIndex + 1}` : undefined}
@@ -362,6 +386,13 @@ function WatchContent() {
 
             {/* 操作栏 */}
             <div className="flex flex-wrap items-center gap-2 mt-3">
+              <button
+                className="btn-ghost btn-sm"
+                onClick={changePlayerMode}
+                title={playerMode === 'native' ? '当前使用浏览器播放器' : '当前使用网页播放器'}
+              >
+                {playerMode === 'native' ? '切换网页播放器' : '切换浏览器播放器'}
+              </button>
               <button
                 className="btn-ghost btn-sm"
                 disabled={currentIndex <= 0}
@@ -464,8 +495,10 @@ function WatchContent() {
                 ))}
               </div>
             )}
-            <p className="hidden md:block text-[10px] text-faint mt-3 leading-relaxed">
-              快捷键：空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · F 全屏 · Alt+←/→ 切换集数
+            <p className="text-[10px] text-faint mt-3 leading-relaxed">
+              {playerMode === 'native'
+                ? '使用浏览器自带控件播放；需要广告过滤和预缓存时可切换网页播放器。'
+                : '快捷键：空格 播放/暂停 · ←/→ 快退/快进 5s · ↑/↓ 音量 · F 全屏 · Alt+←/→ 切换集数'}
             </p>
           </aside>
         </div>

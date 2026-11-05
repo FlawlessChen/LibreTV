@@ -204,7 +204,7 @@ describe('POST /api/search', () => {
   it('未登录返回 401，未配置密码返回 503', async () => {
     vi.stubGlobal('fetch', vi.fn());
     const saved = process.env.PASSWORD;
-    delete process.env.PASSWORD;
+    Reflect.deleteProperty(process.env, 'PASSWORD');
     try {
       const noPassword = await POST(makeRequest({ wd: 'x', sources: SOURCES }));
       expect(noPassword.status).toBe(503);

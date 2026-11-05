@@ -14,7 +14,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  delete process.env.PASSWORD;
+  Reflect.deleteProperty(process.env, 'PASSWORD');
 });
 
 describe('signSession / verifySession', () => {
@@ -71,7 +71,7 @@ describe('checkPassword', () => {
 
   it('未配置 PASSWORD 时一律拒绝', () => {
     const saved = process.env.PASSWORD;
-    delete process.env.PASSWORD;
+    Reflect.deleteProperty(process.env, 'PASSWORD');
     try {
       expect(checkPassword(TEST_PASSWORD)).toBe(false);
     } finally {

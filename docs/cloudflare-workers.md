@@ -56,6 +56,29 @@ PASSWORD 必须作为 Worker 运行时机密设置。本项目不需要在构建
 其他 DEFAULT_SOURCES、DEFAULT_SUBSCRIPTIONS、REQUEST_TIMEOUT 等变量仍按 README 配置。
 配置中的 keep_vars 保留控制台设置的普通变量，避免后续 Git 部署将其清除。
 
+## 当前默认播放源
+
+生产站点的 DEFAULT_SOURCES 配置备份见 [cloudflare-default-sources.json](./cloudflare-default-sources.json)。
+2026-11-05 保留原有 360、量子、金鹰，在末尾追加暴风、非凡、虎牙、红牛，共 7 个源。
+追加源时不要重排已有条目：预置源的 env_0、env_1 等 key 来自数组下标，重排会改变历史记录和收藏关联的源。
+
+新增的 4 个源已通过生产 Worker 对《嫁金钗》第一集的搜索、详情、m3u8 和两处 128 KiB
+分片采样检查；带 AES-128 加密的虎牙和红牛同时检查了 16 字节密钥响应。
+这些检查反映测试时的可达性，不保证所有影片、所有地区或长期持续播放速度。
+本次未加入分片超时的速播、清单返回 403 的无尽和暂不支持搜索的闪电。
+
+修改这个 JSON 文件不会自动更新线上环境变量。需要在 libretv Worker 的 Variables and Secrets
+中将 DEFAULT_SOURCES 的值更新为文件内的 JSON 数组并部署；现有 PASSWORD、PROXY_SECRET 保持原值。
+新源首次下发后前端会自动勾选，刷新站点即可看到；已经手动取消勾选的源会保留用户选择。
+
+## 浏览器播放器
+
+点播页默认使用浏览器自带控件。夸克和支持原生 HLS 的浏览器优先直接加载 m3u8 地址，
+方便浏览器接管播放；源不可达时尝试同源代理，必要时再使用 hls.js 兼容播放。
+播放区下方可切换浏览器播放器／网页播放器，选择保存在当前设备，切换时保留进度。
+浏览器模式的原生路径由浏览器处理媒体，网页播放器继续提供广告过滤和前向预缓存。
+夸克自己的接管界面和投屏入口仍取决于手机端浏览器能力及设置。
+
 如需更改 Worker 名称，同时修改 wrangler.jsonc 的 name 与控制台项目名称。
 自定义域名可以在部署完成后通过 Worker 的 Domains & Routes 添加。
 
